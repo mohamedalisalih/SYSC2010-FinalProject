@@ -8,22 +8,27 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 
 from io_loader import load_csv_numeric, SignalData
 from analysis import make_time_axis, compute_fft
+from processing import FilterSpec, design_and_apply
 
 
 class SignalAnalyzerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SYSC2010 Signal Analyzer")
-        self.geometry("1000x700")
+        self.geometry("1100x780")
 
         # Stored data
         self.data: SignalData | None = None
         self.loaded_path: str | None = None
 
+        # Filtered signal storage
+        self.filtered_x = None  # numpy array or None
+
         # ===== Controls Frame =====
         controls = ttk.LabelFrame(self, text="Controls")
         controls.pack(fill="x", padx=10, pady=10)
 
+        # Row 0
         self.btn_load = ttk.Button(controls, text="Load CSV", command=self.on_load_csv)
         self.btn_load.grid(row=0, column=0, padx=8, pady=8, sticky="w")
 
@@ -63,6 +68,23 @@ class SignalAnalyzerApp(tk.Tk):
         self.btn_reset = ttk.Button(controls, text="Reset", command=self.on_reset)
         self.btn_reset.grid(row=0, column=8, padx=8, pady=8, sticky="w")
 
+        # Row 1 (filter params)
+        ttk.Label(controls, text="Order:").grid(row=1, column=1, padx=8, pady=6, sticky="e")
+        self.order_var = tk.StringVar(value="51")
+        ttk.Entry(controls, textvariable=self.order_var, width=8).grid(row=1, column=2, padx=8, pady=6, sticky="w")
+
+        ttk.Label(controls, text="Cutoff1 (Hz):").grid(row=1, column=3, padx=8, pady=6, sticky="e")
+        self.cut1_var = tk.StringVar(value="15")
+        ttk.Entry(controls, textvariable=self.cut1_var, width=10).grid(row=1, column=4, padx=8, pady=6, sticky="w")
+
+        ttk.Label(controls, text="Cutoff2 (Hz):").grid(row=1, column=5, padx=8, pady=6, sticky="e")
+        self.cut2_var = tk.StringVar(value="40")
+        ttk.Entry(controls, textvariable=self.cut2_var, width=10).grid(row=1, column=6, padx=8, pady=6, sticky="w")
+
+        ttk.Label(controls, text="fs (Hz):").grid(row=1, column=7, padx=8, pady=6, sticky="e")
+        self.fs_var = tk.StringVar(value="100")
+        ttk.Entry(controls, textvariable=self.fs_var, width=10).grid(row=1, column=8, padx=8, pady=6, sticky="w")
+
         controls.columnconfigure(9, weight=1)
 
         # ===== Status Frame =====
@@ -77,25 +99,21 @@ class SignalAnalyzerApp(tk.Tk):
         ttk.Label(status, textvariable=self.samples_label_var).pack(anchor="w", padx=10, pady=2)
         ttk.Label(status, textvariable=self.preview_label_var).pack(anchor="w", padx=10, pady=(2, 8))
 
-        # ===== Plots (Week 7-8) =====
-        plots = ttk.LabelFrame(self, text="Plots (Week 7-8)")
+        # ===== Plots =====
+        plots = ttk.LabelFrame(self, text="Plots")
         plots.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Tabs: Raw + FFT
         self.plot_tabs = ttk.Notebook(plots)
         self.plot_tabs.pack(fill="both", expand=True)
 
         self.tab_raw = ttk.Frame(self.plot_tabs)
         self.tab_fft = ttk.Frame(self.plot_tabs)
-        self.plot_tabs.add(self.tab_raw, text="Raw Signal")
+        self.plot_tabs.add(self.tab_raw, text="Raw / Filtered")
         self.plot_tabs.add(self.tab_fft, text="FFT")
 
-        # --- Raw figure ---
+        # Raw figure
         self.fig_raw = Figure(figsize=(7, 3.5), dpi=100)
         self.ax_raw = self.fig_raw.add_subplot(111)
-        self.ax_raw.set_title("Time Domain")
-        self.ax_raw.set_xlabel("t (s) or sample index")
-        self.ax_raw.set_ylabel("Amplitude")
 
         self.canvas_raw = FigureCanvasTkAgg(self.fig_raw, master=self.tab_raw)
         self.canvas_raw.draw()
@@ -104,12 +122,9 @@ class SignalAnalyzerApp(tk.Tk):
         self.toolbar_raw = NavigationToolbar2Tk(self.canvas_raw, self.tab_raw)
         self.toolbar_raw.update()
 
-        # --- FFT figure ---
+        # FFT figure
         self.fig_fft = Figure(figsize=(7, 3.5), dpi=100)
         self.ax_fft = self.fig_fft.add_subplot(111)
-        self.ax_fft.set_title("FFT Magnitude")
-        self.ax_fft.set_xlabel("Frequency (Hz)")
-        self.ax_fft.set_ylabel("|X(f)|")
 
         self.canvas_fft = FigureCanvasTkAgg(self.fig_fft, master=self.tab_fft)
         self.canvas_fft.draw()
@@ -118,7 +133,7 @@ class SignalAnalyzerApp(tk.Tk):
         self.toolbar_fft = NavigationToolbar2Tk(self.canvas_fft, self.tab_fft)
         self.toolbar_fft.update()
 
-        # Initial empty plots
+        # Initial plots
         self.update_plots()
 
     def on_load_csv(self):
@@ -137,12 +152,13 @@ class SignalAnalyzerApp(tk.Tk):
 
         self.data = data
         self.loaded_path = path
+        self.filtered_x = None  # reset filtered whenever loading new file
 
         # Update status
         fname = os.path.basename(path)
         self.file_label_var.set(f"File: {fname}")
 
-        # ===== Auto-select signal type based on filename =====
+        # Auto-select signal type based on filename
         name = fname.lower()
         if "ecg" in name:
             self.signal_type.set("ECG")
@@ -152,7 +168,6 @@ class SignalAnalyzerApp(tk.Tk):
             self.signal_type.set("Temperature")
         elif "motion" in name or "imu" in name:
             self.signal_type.set("Motion")
-        # ====================================================
 
         n = len(data.x)
         has_t = data.t is not None and len(data.t) == n
@@ -162,7 +177,6 @@ class SignalAnalyzerApp(tk.Tk):
         last = data.x[-1]
         self.preview_label_var.set(f"Preview: x[0]={first:.4f}   x[-1]={last:.4f}")
 
-        # Update plots
         self.update_plots()
 
     def on_apply(self):
@@ -170,24 +184,72 @@ class SignalAnalyzerApp(tk.Tk):
             messagebox.showwarning("No Data", "Load a CSV file first.")
             return
 
-        stype = self.signal_type.get()
-        messagebox.showinfo("Week Check", f"Loaded data OK.\nSelected signal type: {stype}")
+        # Read numeric inputs
+        try:
+            fs = float(self.fs_var.get())
+            order = int(float(self.order_var.get()))
+            cut1 = float(self.cut1_var.get())
+            cut2 = float(self.cut2_var.get())
+        except ValueError:
+            messagebox.showerror("Input Error", "Order, cutoffs, and fs must be numbers.")
+            return
+
+        ftype = self.filter_type.get()
+        method = self.method.get()
+
+        # Basic validation
+        if fs <= 0:
+            messagebox.showerror("Input Error", "fs must be > 0.")
+            return
+
+        nyq = fs / 2.0
+
+        if ftype != "None":
+            if cut1 <= 0 or cut1 >= nyq:
+                messagebox.showerror("Input Error", f"Cutoff1 must be between 0 and {nyq:.2f}.")
+                return
+
+            if ftype == "BPF":
+                if cut2 <= 0 or cut2 >= nyq:
+                    messagebox.showerror("Input Error", f"Cutoff2 must be between 0 and {nyq:.2f}.")
+                    return
+                if cut2 <= cut1:
+                    messagebox.showerror("Input Error", "For BPF, cutoff2 must be greater than cutoff1.")
+                    return
+
+        x = np.array(self.data.x, dtype=float)
+
+        try:
+            spec = FilterSpec(
+                filter_type=ftype,
+                method=method,
+                order=order,
+                cutoff1=cut1,
+                cutoff2=cut2,
+                fs=fs
+            )
+            self.filtered_x = design_and_apply(x, spec)
+        except Exception as e:
+            messagebox.showerror("Filter Error", str(e))
+            return
+
+        self.update_plots()
 
     def on_reset(self):
         self.data = None
         self.loaded_path = None
+        self.filtered_x = None
         self.file_label_var.set("File: (none)")
         self.samples_label_var.set("Samples: (none)")
         self.preview_label_var.set("Preview: (none)")
         self.update_plots()
 
     def update_plots(self):
-        # Clear axes
         self.ax_raw.clear()
         self.ax_fft.clear()
 
         if self.data is None:
-            self.ax_raw.set_title("Time Domain")
+            self.ax_raw.set_title("Raw / Filtered (Time Domain)")
             self.ax_raw.text(
                 0.5, 0.5, "Load a CSV to plot",
                 ha="center", va="center",
@@ -211,19 +273,29 @@ class SignalAnalyzerApp(tk.Tk):
             self.canvas_fft.draw()
             return
 
-        # Build axes
+        # Time axis
         t_axis = make_time_axis(self.data.t, self.data.x)
         x = np.array(self.data.x, dtype=float)
 
-        # Raw plot
-        self.ax_raw.plot(t_axis, x)
-        self.ax_raw.set_title("Time Domain")
+        # Plot raw
+        self.ax_raw.plot(t_axis, x, label="Raw")
+
+        # Plot filtered (if available)
+        if self.filtered_x is not None and len(self.filtered_x) == len(x):
+            self.ax_raw.plot(t_axis, self.filtered_x, linestyle="--", label="Filtered")
+
+        self.ax_raw.set_title("Raw / Filtered (Time Domain)")
         self.ax_raw.set_xlabel("t (s) or sample index")
         self.ax_raw.set_ylabel("Amplitude")
         self.ax_raw.grid(True)
+        self.ax_raw.legend()
 
-        # FFT plot
-        freqs, mag = compute_fft(self.data.x, t_axis)
+        # FFT uses filtered if available
+        x_for_fft = x
+        if self.filtered_x is not None and len(self.filtered_x) == len(x):
+            x_for_fft = np.array(self.filtered_x, dtype=float)
+
+        freqs, mag = compute_fft(list(x_for_fft), np.array(t_axis, dtype=float))
         if freqs.size > 0:
             self.ax_fft.plot(freqs, mag)
 
