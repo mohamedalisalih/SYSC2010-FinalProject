@@ -14,8 +14,10 @@ from analysis import (
     estimate_hr_ecg,
     estimate_resp_rate,
     estimate_temp_slope,
+    estimate_fs_from_t,
 )
 from processing import FilterSpec, design_and_apply
+from preprocess import preprocess_signal, get_preprocess_defaults
 
 
 class SignalAnalyzerApp(tk.Tk):
@@ -24,30 +26,28 @@ class SignalAnalyzerApp(tk.Tk):
         self.title("SYSC2010 Signal Analyzer")
         self.geometry("1100x860")
 
-        # Stored data
         self.data: SignalData | None = None
         self.loaded_path: str | None = None
+        self.preprocessed_x = None
+        self.filtered_x = None
 
-        # Filtered signal storage
-        self.filtered_x = None  # numpy array or None
-
-        # ===== Controls Frame =====
         controls = ttk.LabelFrame(self, text="Controls")
         controls.pack(fill="x", padx=10, pady=10)
 
-        # Row 0
         self.btn_load = ttk.Button(controls, text="Load CSV", command=self.on_load_csv)
         self.btn_load.grid(row=0, column=0, padx=8, pady=8, sticky="w")
 
         ttk.Label(controls, text="Signal Type:").grid(row=0, column=1, padx=8, pady=8, sticky="e")
         self.signal_type = tk.StringVar(value="ECG")
-        ttk.Combobox(
+        self.signal_combo = ttk.Combobox(
             controls,
             textvariable=self.signal_type,
             values=["ECG", "Respiration", "Temperature", "Motion"],
             state="readonly",
             width=15
-        ).grid(row=0, column=2, padx=8, pady=8, sticky="w")
+        )
+        self.signal_combo.grid(row=0, column=2, padx=8, pady=8, sticky="w")
+        self.signal_combo.bind("<<ComboboxSelected>>", lambda e: self.on_signal_type_changed())
 
         ttk.Label(controls, text="Filter:").grid(row=0, column=3, padx=8, pady=8, sticky="e")
         self.filter_type = tk.StringVar(value="None")
@@ -75,13 +75,12 @@ class SignalAnalyzerApp(tk.Tk):
         self.btn_reset = ttk.Button(controls, text="Reset", command=self.on_reset)
         self.btn_reset.grid(row=0, column=8, padx=8, pady=8, sticky="w")
 
-        # Row 1 (filter params)
         ttk.Label(controls, text="Order:").grid(row=1, column=1, padx=8, pady=6, sticky="e")
         self.order_var = tk.StringVar(value="51")
         ttk.Entry(controls, textvariable=self.order_var, width=8).grid(row=1, column=2, padx=8, pady=6, sticky="w")
 
         ttk.Label(controls, text="Cutoff1 (Hz):").grid(row=1, column=3, padx=8, pady=6, sticky="e")
-        self.cut1_var = tk.StringVar(value="15")
+        self.cut1_var = tk.StringVar(value="0.5")
         ttk.Entry(controls, textvariable=self.cut1_var, width=10).grid(row=1, column=4, padx=8, pady=6, sticky="w")
 
         ttk.Label(controls, text="Cutoff2 (Hz):").grid(row=1, column=5, padx=8, pady=6, sticky="e")
@@ -94,7 +93,6 @@ class SignalAnalyzerApp(tk.Tk):
 
         controls.columnconfigure(9, weight=1)
 
-        # ===== Status Frame =====
         status = ttk.LabelFrame(self, text="Loaded Data Status")
         status.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -106,7 +104,6 @@ class SignalAnalyzerApp(tk.Tk):
         ttk.Label(status, textvariable=self.samples_label_var).pack(anchor="w", padx=10, pady=2)
         ttk.Label(status, textvariable=self.preview_label_var).pack(anchor="w", padx=10, pady=(2, 8))
 
-        # ===== Stats / Features =====
         stats = ttk.LabelFrame(self, text="Statistics / Features")
         stats.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -118,7 +115,6 @@ class SignalAnalyzerApp(tk.Tk):
         ttk.Label(stats, textvariable=self.stats_proc_var).pack(anchor="w", padx=10, pady=2)
         ttk.Label(stats, textvariable=self.feature_var).pack(anchor="w", padx=10, pady=(2, 8))
 
-        # ===== Plots =====
         plots = ttk.LabelFrame(self, text="Plots")
         plots.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
@@ -130,7 +126,6 @@ class SignalAnalyzerApp(tk.Tk):
         self.plot_tabs.add(self.tab_raw, text="Raw / Filtered")
         self.plot_tabs.add(self.tab_fft, text="FFT")
 
-        # Raw figure
         self.fig_raw = Figure(figsize=(7, 3.5), dpi=100)
         self.ax_raw = self.fig_raw.add_subplot(111)
 
@@ -141,7 +136,6 @@ class SignalAnalyzerApp(tk.Tk):
         self.toolbar_raw = NavigationToolbar2Tk(self.canvas_raw, self.tab_raw)
         self.toolbar_raw.update()
 
-        # FFT figure
         self.fig_fft = Figure(figsize=(7, 3.5), dpi=100)
         self.ax_fft = self.fig_fft.add_subplot(111)
 
@@ -152,8 +146,37 @@ class SignalAnalyzerApp(tk.Tk):
         self.toolbar_fft = NavigationToolbar2Tk(self.canvas_fft, self.tab_fft)
         self.toolbar_fft.update()
 
-        # Initial plots
+        self.apply_signal_defaults()
         self.update_plots()
+
+    def apply_signal_defaults(self):
+        stype = self.signal_type.get().strip().lower()
+
+        if stype == "ecg":
+            self.cut1_var.set("0.5")
+            self.cut2_var.set("40")
+            self.order_var.set("51")
+
+        elif stype == "respiration":
+            self.cut1_var.set("0.1")
+            self.cut2_var.set("1.0")
+            self.order_var.set("51")
+
+        elif stype == "temperature":
+            self.cut1_var.set("0.01")
+            self.cut2_var.set("0.10")
+            self.order_var.set("21")
+
+        elif stype == "motion":
+            self.cut1_var.set("0.5")
+            self.cut2_var.set("10")
+            self.order_var.set("51")
+
+    def on_signal_type_changed(self):
+        current_fs = self.fs_var.get()
+        self.apply_signal_defaults()
+        if current_fs:
+            self.fs_var.set(current_fs)
 
     def on_load_csv(self):
         path = filedialog.askopenfilename(
@@ -163,22 +186,9 @@ class SignalAnalyzerApp(tk.Tk):
         if not path:
             return
 
-        try:
-            data = load_csv_numeric(path)
-        except Exception as e:
-            messagebox.showerror("Load Error", f"Could not load CSV:\n{e}")
-            return
-
-        self.data = data
-        self.loaded_path = path
-        self.filtered_x = None
-
-        # Status
         fname = os.path.basename(path)
-        self.file_label_var.set(f"File: {fname}")
-
-        # Auto-select signal type based on filename
         name = fname.lower()
+
         if "ecg" in name:
             self.signal_type.set("ECG")
         elif "resp" in name:
@@ -188,11 +198,50 @@ class SignalAnalyzerApp(tk.Tk):
         elif "motion" in name or "imu" in name:
             self.signal_type.set("Motion")
 
+        try:
+            data = load_csv_numeric(path, preferred_signal_type=self.signal_type.get())
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Could not load CSV:\n{e}")
+            return
+
+        self.data = data
+        self.loaded_path = path
+        self.preprocessed_x = None
+        self.filtered_x = None
+
+        self.file_label_var.set(f"File: {fname}")
+
         n = len(data.x)
         has_t = data.t is not None and len(data.t) == n
-        self.samples_label_var.set(f"Samples: {n}   (time column: {'yes' if has_t else 'no'})")
+        label_extra = ""
+        if data.signal_name:
+            label_extra = f"   (signal column: {data.signal_name})"
+        self.samples_label_var.set(f"Samples: {n}   (time column: {'yes' if has_t else 'no'}){label_extra}")
 
         self.preview_label_var.set(f"Preview: x[0]={data.x[0]:.4f}   x[-1]={data.x[-1]:.4f}")
+
+        detected_fs = ""
+        if data.t is not None and len(data.t) >= 2:
+            t_axis = np.array(data.t, dtype=float)
+            fs_est = estimate_fs_from_t(t_axis)
+            if fs_est is not None:
+                detected_fs = f"{fs_est:.3f}"
+
+        self.apply_signal_defaults()
+
+        if detected_fs:
+            self.fs_var.set(detected_fs)
+        else:
+            if self.signal_type.get() == "Respiration":
+                self.fs_var.set("125")
+            elif self.signal_type.get() == "ECG":
+                self.fs_var.set("360")
+
+        try:
+            defaults = get_preprocess_defaults(self.signal_type.get())
+            self.preprocessed_x = preprocess_signal(np.array(data.x, dtype=float), **defaults)
+        except Exception:
+            self.preprocessed_x = None
 
         self.update_plots()
 
@@ -235,6 +284,13 @@ class SignalAnalyzerApp(tk.Tk):
         x = np.array(self.data.x, dtype=float)
 
         try:
+            defaults = get_preprocess_defaults(self.signal_type.get())
+            self.preprocessed_x = preprocess_signal(x, **defaults)
+        except Exception as e:
+            messagebox.showerror("Preprocessing Error", str(e))
+            return
+
+        try:
             spec = FilterSpec(
                 filter_type=ftype,
                 method=method,
@@ -243,7 +299,12 @@ class SignalAnalyzerApp(tk.Tk):
                 cutoff2=cut2,
                 fs=fs
             )
-            self.filtered_x = design_and_apply(x, spec)
+
+            if ftype == "None":
+                self.filtered_x = None
+            else:
+                self.filtered_x = design_and_apply(self.preprocessed_x, spec)
+
         except Exception as e:
             messagebox.showerror("Filter Error", str(e))
             return
@@ -253,6 +314,7 @@ class SignalAnalyzerApp(tk.Tk):
     def on_reset(self):
         self.data = None
         self.loaded_path = None
+        self.preprocessed_x = None
         self.filtered_x = None
 
         self.file_label_var.set("File: (none)")
@@ -272,16 +334,22 @@ class SignalAnalyzerApp(tk.Tk):
         self.stats_raw_var.set(
             f"Raw: mean={m_raw['mean']:.4f}, std={m_raw['std']:.4f}, rms={m_raw['rms']:.4f}, p2p={m_raw['ptp']:.4f}"
         )
+
+        proc_label = "Processed"
+        if self.filtered_x is not None:
+            proc_label = "Filtered"
+        elif self.preprocessed_x is not None:
+            proc_label = "Preprocessed"
+
         self.stats_proc_var.set(
-            f"Processed: mean={m_proc['mean']:.4f}, std={m_proc['std']:.4f}, rms={m_proc['rms']:.4f}, p2p={m_proc['ptp']:.4f}"
+            f"{proc_label}: mean={m_proc['mean']:.4f}, std={m_proc['std']:.4f}, rms={m_proc['rms']:.4f}, p2p={m_proc['ptp']:.4f}"
         )
 
-        # fs hint from GUI if available
         fs_hint = None
         try:
             fs_hint = float(self.fs_var.get())
         except Exception:
-            fs_hint = None
+            pass
 
         stype = self.signal_type.get()
         if stype == "ECG":
@@ -293,7 +361,7 @@ class SignalAnalyzerApp(tk.Tk):
                 "Feature: Resp rate = (not enough peaks)" if br is None else f"Feature: Resp rate ≈ {br:.1f} breaths/min"
             )
         elif stype == "Temperature":
-            slope = estimate_temp_slope(t_axis, x_proc)
+            slope = estimate_temp_slope(t_axis, x_raw)
             self.feature_var.set(
                 "Feature: Temp slope = (need more points)" if slope is None else f"Feature: Trend slope ≈ {slope:.6f} units/s"
             )
@@ -321,19 +389,23 @@ class SignalAnalyzerApp(tk.Tk):
             self.canvas_fft.draw()
             return
 
-        # Time axis + raw data
         t_axis = make_time_axis(self.data.t, self.data.x)
         x = np.array(self.data.x, dtype=float)
 
-        # Processed signal (filtered if present)
         x_proc = x
+        proc_label = "Raw"
+
+        if self.preprocessed_x is not None and len(self.preprocessed_x) == len(x):
+            x_proc = np.array(self.preprocessed_x, dtype=float)
+            proc_label = "Preprocessed"
+
         if self.filtered_x is not None and len(self.filtered_x) == len(x):
             x_proc = np.array(self.filtered_x, dtype=float)
+            proc_label = "Filtered"
 
-        # Plot raw + processed
         self.ax_raw.plot(t_axis, x, label="Raw")
-        if x_proc is not x:
-            self.ax_raw.plot(t_axis, x_proc, linestyle="--", label="Processed")
+        if (self.preprocessed_x is not None) or (self.filtered_x is not None):
+            self.ax_raw.plot(t_axis, x_proc, linestyle="--", label=proc_label)
 
         self.ax_raw.set_title("Raw / Processed (Time Domain)")
         self.ax_raw.set_xlabel("t (s) or sample index")
@@ -341,8 +413,13 @@ class SignalAnalyzerApp(tk.Tk):
         self.ax_raw.grid(True)
         self.ax_raw.legend()
 
-        # FFT uses processed if available
-        freqs, mag = compute_fft(list(x_proc), np.array(t_axis, dtype=float))
+        fs_hint = None
+        try:
+            fs_hint = float(self.fs_var.get())
+        except Exception:
+            pass
+
+        freqs, mag = compute_fft(list(x_proc), np.array(t_axis, dtype=float), fs_hint=fs_hint)
         if freqs.size > 0:
             self.ax_fft.plot(freqs, mag)
 
@@ -351,7 +428,6 @@ class SignalAnalyzerApp(tk.Tk):
         self.ax_fft.set_ylabel("|X(f)|")
         self.ax_fft.grid(True)
 
-        # Update stats panel
         self.update_stats_panel(np.array(t_axis, dtype=float), x, x_proc)
 
         self.canvas_raw.draw()
