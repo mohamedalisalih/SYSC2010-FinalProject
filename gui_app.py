@@ -44,7 +44,7 @@ class SignalAnalyzerApp(tk.Tk):
             textvariable=self.signal_type,
             values=["ECG", "Respiration", "Temperature", "Motion"],
             state="readonly",
-            width=15
+            width=15,
         )
         self.signal_combo.grid(row=0, column=2, padx=8, pady=8, sticky="w")
         self.signal_combo.bind("<<ComboboxSelected>>", lambda e: self.on_signal_type_changed())
@@ -56,7 +56,7 @@ class SignalAnalyzerApp(tk.Tk):
             textvariable=self.filter_type,
             values=["None", "LPF", "HPF", "BPF"],
             state="readonly",
-            width=8
+            width=8,
         ).grid(row=0, column=4, padx=8, pady=8, sticky="w")
 
         ttk.Label(controls, text="Method:").grid(row=0, column=5, padx=8, pady=8, sticky="e")
@@ -66,7 +66,7 @@ class SignalAnalyzerApp(tk.Tk):
             textvariable=self.method,
             values=["FIR", "IIR"],
             state="readonly",
-            width=6
+            width=6,
         ).grid(row=0, column=6, padx=8, pady=8, sticky="w")
 
         self.btn_apply = ttk.Button(controls, text="Apply", command=self.on_apply)
@@ -239,6 +239,8 @@ class SignalAnalyzerApp(tk.Tk):
 
         try:
             defaults = get_preprocess_defaults(self.signal_type.get())
+            if self.signal_type.get() == "ECG":
+                defaults["normalize_method"] = "none"
             self.preprocessed_x = preprocess_signal(np.array(data.x, dtype=float), **defaults)
         except Exception:
             self.preprocessed_x = None
@@ -270,22 +272,36 @@ class SignalAnalyzerApp(tk.Tk):
 
         if ftype != "None":
             if cut1 <= 0 or cut1 >= nyq:
-                messagebox.showerror("Input Error", f"Cutoff1 must be between 0 and {nyq:.2f}.")
+                messagebox.showerror("Input Error", f"Cutoff1 must be between 0 and {nyq:.6f}.")
                 return
 
             if ftype == "BPF":
                 if cut2 <= 0 or cut2 >= nyq:
-                    messagebox.showerror("Input Error", f"Cutoff2 must be between 0 and {nyq:.2f}.")
+                    messagebox.showerror("Input Error", f"Cutoff2 must be between 0 and {nyq:.6f}.")
                     return
                 if cut2 <= cut1:
                     messagebox.showerror("Input Error", "For BPF, cutoff2 must be greater than cutoff1.")
                     return
 
+        if method == "IIR" and order > 8:
+            messagebox.showerror("Input Error", "For IIR, use a small order like 2, 4, or 6.")
+            return
+
         x = np.array(self.data.x, dtype=float)
 
         try:
             defaults = get_preprocess_defaults(self.signal_type.get())
+
+            # Keep ECG filtering on a realistic amplitude scale.
+            if self.signal_type.get() == "ECG":
+                defaults["normalize_method"] = "none"
+
+            # Avoid double baseline removal for ECG HPF.
+            if self.signal_type.get() == "ECG" and self.filter_type.get() == "HPF":
+                defaults["baseline_method"] = "none"
+
             self.preprocessed_x = preprocess_signal(x, **defaults)
+
         except Exception as e:
             messagebox.showerror("Preprocessing Error", str(e))
             return
